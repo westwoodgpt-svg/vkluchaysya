@@ -1,0 +1,6 @@
+{
+  "name": "Включайся — Портал идей",
+  "description": "Приложение для подачи идей и предложений сотрудников с интеграцией в CRM Битрикс24",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
