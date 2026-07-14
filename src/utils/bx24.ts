@@ -24,7 +24,15 @@ export const RECOMMENDED_FIELDS: FieldDef[] = [
  * Checks if the official Bitrix24 JS SDK is available in the browser.
  */
 export function isBx24Available(): boolean {
-  return typeof window !== "undefined" && (window as any).BX24 !== undefined;
+  if (typeof window === "undefined") return false;
+  // The official Bitrix24 SDK script sets `window.BX24 = null` synchronously
+  // on load, then replaces it with a real object only after it finishes an
+  // async postMessage handshake with the parent frame. Checking
+  // `!== undefined` treats that transient `null` as "available" and crashes
+  // every call (`Cannot read properties of null`) if our code runs before
+  // the handshake completes. Require a real object with callMethod present.
+  const bx = (window as any).BX24;
+  return !!bx && typeof bx.callMethod === "function";
 }
 
 /**
