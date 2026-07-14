@@ -123,7 +123,18 @@ export default function App() {
     adjustIframeHeight();
   }, [activeTab]);
 
-  // Ensures the custom UF_CRM_IDEA_* lead fields exist (creating any missing
+  // Matches a recommended field to an existing CRM lead field either by its
+  // exact code (UF_CRM_IDEA_*) or by its display name ("Включайся: ...").
+  // Name matching lets manually created fields work too — the lead card UI
+  // auto-generates codes like UF_CRM_17xxxxx that can't be customized.
+  const resolveCrmField = (def: (typeof RECOMMENDED_FIELDS)[number], fields: { id: string; title: string }[]) => {
+    const byCode = fields.find(f => f.id === def.fullCode);
+    if (byCode) return byCode;
+    const wanted = def.label.trim().toLowerCase();
+    return fields.find(f => f.id.startsWith("UF_") && f.title.trim().toLowerCase() === wanted);
+  };
+
+  // Ensures the custom "Включайся" lead fields exist (creating any missing
   // ones — requires CRM admin rights) and maps every form field that has a
   // matching CRM field. Fields that could not be created stay on the
   // COMMENTS fallback, which is always written anyway. Returns the fresh
@@ -132,7 +143,7 @@ export default function App() {
     try {
       let fields = await fetchLeadFields();
       const missing = RECOMMENDED_FIELDS.filter(
-        def => !fields.some(f => f.id === def.fullCode)
+        def => !resolveCrmField(def, fields)
       );
 
       if (missing.length > 0) {
@@ -157,8 +168,9 @@ export default function App() {
 
       const newMapping: FieldMapping = { ...DEFAULT_MAPPING };
       for (const def of RECOMMENDED_FIELDS) {
-        if (fields.some(f => f.id === def.fullCode)) {
-          newMapping[def.key as keyof FieldMapping] = def.fullCode;
+        const match = resolveCrmField(def, fields);
+        if (match) {
+          newMapping[def.key as keyof FieldMapping] = match.id;
         }
       }
 
