@@ -53,7 +53,19 @@ export function whenBx24Ready(timeoutMs = 4000): Promise<boolean> {
     const poll = () => {
       if (isBx24Available()) {
         try {
-          (window as any).BX24.init(() => resolve(true));
+          (window as any).BX24.init(() => {
+            // Tell Bitrix24 the installation is complete. Until this is
+            // called (once, by an admin opening the app), regular employees
+            // get the "Приложение ещё не установлено до конца" stub instead
+            // of the app. Safe to call on every load — it's a no-op when
+            // the app is already marked as installed.
+            try {
+              (window as any).BX24.installFinish();
+            } catch (e) {
+              console.warn("BX24.installFinish failed:", e);
+            }
+            resolve(true);
+          });
           // Safety net in case the init callback never fires
           setTimeout(() => resolve(true), 1500);
         } catch {
