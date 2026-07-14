@@ -1,26 +1,23 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  Lightbulb, 
-  Settings, 
-  History, 
-  Compass, 
-  HelpCircle,
+import {
+  Lightbulb,
+  History,
   Sparkles,
-  PhoneCall,
   Menu,
   X
 } from "lucide-react";
 import { IdeaForm, FieldMapping, ArchiveItem, BitrixAuth } from "./types";
-import { 
-  getAuth, 
-  callMethod, 
-  isBx24Available, 
+import {
+  getAuth,
+  callMethod,
   adjustIframeHeight,
-  fetchLeadFields
+  fetchLeadFields,
+  createLeadUserField,
+  whenBx24Ready,
+  RECOMMENDED_FIELDS
 } from "./utils/bx24";
 import LeadForm from "./components/LeadForm";
-import CrmIntegration from "./components/CrmIntegration";
 import Archive from "./components/Archive";
 
 // Background SVG identical to the user's Vue layout
@@ -51,7 +48,7 @@ const DEFAULT_MAPPING: FieldMapping = {
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"form" | "archive" | "settings">("form");
+  const [activeTab, setActiveTab] = useState<"form" | "archive">("form");
   const [auth, setAuth] = useState<BitrixAuth | null>(null);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [autoFilled, setAutoFilled] = useState(false);
@@ -76,11 +73,9 @@ export default function App() {
 
   // Load static data and auth
   useEffect(() => {
-    // 1. Get Authentication
-    const activeAuth = getAuth();
-    setAuth(activeAuth);
+    let cancelled = false;
 
-    // 2. Load Archive from localStorage
+    // 1. Load Archive from localStorage
     try {
       const savedArchive = localStorage.getItem("ideas_archive");
       if (savedArchive) {
@@ -90,26 +85,35 @@ export default function App() {
       console.warn("Failed to load archive", e);
     }
 
-    // 3. Load Field Mappings from localStorage
+    // 2. Load cached field mapping (refreshed from CRM once auth resolves)
     try {
       const savedMapping = localStorage.getItem("crm_field_mapping");
       if (savedMapping) {
         setMapping(JSON.parse(savedMapping));
-      } else {
-        // Fallback or automatic detection of preset fields in the CRM
-        if (activeAuth) {
-          detectPreExistingCrmFields();
-        }
       }
     } catch (e) {
       console.warn("Failed to load crm mappings", e);
     }
+
+    // 3. Get Authentication — wait for the BX24 SDK handshake first so
+    // BX24.getAuth() can be used as the primary token source
+    (async () => {
+      await whenBx24Ready();
+      if (!cancelled) {
+        setAuth(getAuth());
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Fetch Bitrix24 User Profile details
+  // Fetch Bitrix24 User Profile details and ensure CRM idea fields exist
   useEffect(() => {
     if (auth) {
       fetchCurrentUser();
+      ensureCrmFields();
     }
   }, [auth]);
 
@@ -118,39 +122,43 @@ export default function App() {
     adjustIframeHeight();
   }, [activeTab]);
 
-  // Attempts to automatically detect if custom CRM fields already exist and maps them
-  const detectPreExistingCrmFields = async () => {
+  // Ensures the custom UF_CRM_IDEA_* lead fields exist (creating any missing
+  // ones — requires CRM admin rights, failures are silent) and maps every
+  // form field that has a matching CRM field. Fields that could not be
+  // created stay on the COMMENTS fallback, which is always written anyway.
+  const ensureCrmFields = async () => {
     try {
-      const fields = await fetchLeadFields();
-      const detected: Partial<FieldMapping> = {};
-      
-      const expectedCodes: Record<keyof FieldMapping, string> = {
-        department: "UF_CRM_IDEA_DEPT",
-        category: "UF_CRM_IDEA_CAT",
-        currentSituation: "UF_CRM_IDEA_SIT",
-        idea: "UF_CRM_IDEA_DESC",
-        materialsLink: "UF_CRM_IDEA_LINK",
-        needFinance: "UF_CRM_IDEA_FIN",
-        implementation: "UF_CRM_IDEA_IMPL",
-        audience: "UF_CRM_IDEA_AUD"
-      };
+      let fields = await fetchLeadFields();
+      const missing = RECOMMENDED_FIELDS.filter(
+        def => !fields.some(f => f.id === def.fullCode)
+      );
 
-      let foundAny = false;
-      for (const [key, code] of Object.entries(expectedCodes)) {
-        const match = fields.find(f => f.id === code);
-        if (match) {
-          detected[key as keyof FieldMapping] = code;
-          foundAny = true;
+      if (missing.length > 0) {
+        let createdAny = false;
+        for (const def of missing) {
+          try {
+            await createLeadUserField(def);
+            createdAny = true;
+          } catch (e) {
+            console.warn(`Could not auto-create CRM field ${def.fullCode}:`, e);
+          }
+        }
+        if (createdAny) {
+          fields = await fetchLeadFields();
         }
       }
 
-      if (foundAny) {
-        const mergedMapping = { ...DEFAULT_MAPPING, ...detected };
-        setMapping(mergedMapping);
-        localStorage.setItem("crm_field_mapping", JSON.stringify(mergedMapping));
+      const newMapping: FieldMapping = { ...DEFAULT_MAPPING };
+      for (const def of RECOMMENDED_FIELDS) {
+        if (fields.some(f => f.id === def.fullCode)) {
+          newMapping[def.key as keyof FieldMapping] = def.fullCode;
+        }
       }
+
+      setMapping(newMapping);
+      localStorage.setItem("crm_field_mapping", JSON.stringify(newMapping));
     } catch (e) {
-      console.warn("Could not automatically check for pre-existing custom fields", e);
+      console.warn("Could not sync CRM idea fields", e);
     }
   };
 
@@ -284,11 +292,6 @@ export default function App() {
     return { ideaNumber, leadId: newItem.leadId };
   };
 
-  const handleSaveMapping = (newMapping: FieldMapping) => {
-    setMapping(newMapping);
-    localStorage.setItem("crm_field_mapping", JSON.stringify(newMapping));
-  };
-
   return (
     <div 
       id="app-root-shell" 
@@ -298,14 +301,29 @@ export default function App() {
       <header className="relative max-w-5xl mx-auto px-4 pt-8 md:pt-12 pb-6 text-left select-none">
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div className="space-y-2">
-            <motion.div 
-              initial={{ opacity: 0, y: -5 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="inline-flex items-center gap-1.5 bg-[#00AEEF]/10 border border-[#00AEEF]/20 px-3.5 py-1 rounded-full text-xs font-bold tracking-wide text-[#00AEEF]"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              ✦ Программа «Включайся»
-            </motion.div>
+            <div className="flex flex-wrap items-center gap-2">
+              <motion.div
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="inline-flex items-center gap-1.5 bg-[#00AEEF]/10 border border-[#00AEEF]/20 px-3.5 py-1 rounded-full text-xs font-bold tracking-wide text-[#00AEEF]"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                ✦ Программа «Включайся»
+              </motion.div>
+              <motion.div
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold border ${
+                  auth
+                    ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                    : "bg-slate-100 border-slate-200 text-slate-500"
+                }`}
+                title={auth ? `Портал: ${auth.domain}` : "Откройте приложение внутри Битрикс24"}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${auth ? "bg-emerald-500" : "bg-slate-400"}`} />
+                {auth ? "Битрикс24 подключен" : "Нет связи с Битрикс24"}
+              </motion.div>
+            </div>
             
             <motion.h1 
               initial={{ opacity: 0 }}
@@ -349,17 +367,6 @@ export default function App() {
             >
               <History className="w-4 h-4" />
               История ({archive.length})
-            </button>
-            <button
-              onClick={() => setActiveTab("settings")}
-              className={`px-4 py-2.5 rounded-lg text-xs font-bold transition-all duration-200 flex items-center gap-2 ${
-                activeTab === "settings" 
-                  ? "bg-white text-[#1D1D1F] shadow-sm" 
-                  : "text-[#86868B] hover:text-[#1D1D1F] hover:bg-white/40"
-              }`}
-            >
-              <Settings className="w-4 h-4" />
-              Интеграция CRM
             </button>
           </nav>
 
@@ -405,18 +412,6 @@ export default function App() {
                 <History className="w-4.5 h-4.5 text-[#00AEEF]" />
                 История предложений ({archive.length})
               </button>
-              <button
-                onClick={() => {
-                  setActiveTab("settings");
-                  setMobileMenuOpen(false);
-                }}
-                className={`w-full py-2.5 px-4 rounded-xl flex items-center gap-2.5 text-left transition ${
-                  activeTab === "settings" ? "bg-[#00AEEF]/10 text-[#00AEEF]" : "hover:bg-slate-50"
-                }`}
-              >
-                <Settings className="w-4.5 h-4.5 text-[#00AEEF]" />
-                Интеграция CRM
-              </button>
             </motion.div>
           )}
         </AnimatePresence>
@@ -433,12 +428,11 @@ export default function App() {
               exit={{ opacity: 0, y: -15 }}
               transition={{ duration: 0.2 }}
             >
-              <LeadForm 
-                initialForm={initialForm} 
+              <LeadForm
+                initialForm={initialForm}
                 mapping={mapping}
                 autoFilled={autoFilled}
                 onSubmit={handleLeadSubmit}
-                onNavigateToSettings={() => setActiveTab("settings")}
               />
             </motion.div>
           )}
@@ -454,23 +448,6 @@ export default function App() {
               <Archive 
                 archive={archive} 
                 onNavigateToForm={() => setActiveTab("form")}
-              />
-            </motion.div>
-          )}
-
-          {activeTab === "settings" && (
-            <motion.div
-              key="settings-tab-view"
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.2 }}
-            >
-              <CrmIntegration 
-                auth={auth} 
-                currentUser={currentUser} 
-                mapping={mapping}
-                onSaveMapping={handleSaveMapping}
               />
             </motion.div>
           )}

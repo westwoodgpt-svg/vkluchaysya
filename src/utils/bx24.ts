@@ -35,6 +35,43 @@ export function isBx24Available(): boolean {
   return !!bx && typeof bx.callMethod === "function";
 }
 
+let readyPromise: Promise<boolean> | null = null;
+
+/**
+ * Waits for the BX24 JS SDK to finish its async handshake with the parent
+ * Bitrix24 frame (or gives up after `timeoutMs` when running outside of
+ * Bitrix24). Resolves true when the SDK is usable, false otherwise.
+ */
+export function whenBx24Ready(timeoutMs = 4000): Promise<boolean> {
+  if (readyPromise) return readyPromise;
+  readyPromise = new Promise((resolve) => {
+    if (typeof window === "undefined") {
+      resolve(false);
+      return;
+    }
+    const started = Date.now();
+    const poll = () => {
+      if (isBx24Available()) {
+        try {
+          (window as any).BX24.init(() => resolve(true));
+          // Safety net in case the init callback never fires
+          setTimeout(() => resolve(true), 1500);
+        } catch {
+          resolve(true);
+        }
+        return;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, 100);
+    };
+    poll();
+  });
+  return readyPromise;
+}
+
 /**
  * Automatically adjusts the height of the Bitrix24 iframe.
  * Should be called whenever the DOM height changes.
@@ -49,11 +86,46 @@ export function adjustIframeHeight() {
   }
 }
 
+function saveAuth(auth: BitrixAuth): BitrixAuth {
+  localStorage.setItem("bx24_auth", JSON.stringify(auth));
+  return auth;
+}
+
 /**
- * Extracts and stores authorization details from URL query params or localStorage.
+ * Extracts and stores authorization details. Sources, in priority order:
+ * 1. Live token from the BX24 JS SDK (auto-refreshed by the SDK itself);
+ * 2. window.__BX_AUTH__ injected server-side from Bitrix24's POST body;
+ * 3. URL query params (legacy redirect flow);
+ * 4. localStorage (last successful auth).
  */
 export function getAuth(): BitrixAuth | null {
   if (typeof window === "undefined") return null;
+
+  if (isBx24Available()) {
+    try {
+      const live = (window as any).BX24.getAuth();
+      if (live && live.access_token && live.domain) {
+        return saveAuth({
+          authId: live.access_token,
+          domain: live.domain,
+          userId: undefined,
+          placement: undefined,
+        });
+      }
+    } catch (e) {
+      console.warn("BX24.getAuth() failed:", e);
+    }
+  }
+
+  const injected = (window as any).__BX_AUTH__;
+  if (injected && injected.AUTH_ID && injected.DOMAIN) {
+    return saveAuth({
+      authId: String(injected.AUTH_ID),
+      domain: String(injected.DOMAIN),
+      userId: injected.USER_ID ? String(injected.USER_ID) : undefined,
+      placement: injected.PLACEMENT ? String(injected.PLACEMENT) : undefined,
+    });
+  }
 
   const params = new URLSearchParams(window.location.search);
   const authId = params.get("AUTH_ID");
@@ -147,8 +219,11 @@ async function callProxyMethod(method: string, params: any = {}): Promise<any> {
 /**
  * Universal execution method - uses native BX24 window SDK if available,
  * otherwise falls back to the server-side CORS-bypass REST proxy.
+ * Always waits for the SDK handshake first so calls made right after
+ * page load don't race it and needlessly fall back to the proxy.
  */
-export function callMethod(method: string, params: any = {}): Promise<any> {
+export async function callMethod(method: string, params: any = {}): Promise<any> {
+  await whenBx24Ready();
   if (isBx24Available()) {
     return callBx24Method(method, params);
   } else {

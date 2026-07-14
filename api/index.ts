@@ -2,57 +2,67 @@ import fs from "fs";
 import path from "path";
 
 // Vercel serverless function bound to the site root ("/").
-// Bitrix24 loads local apps by sending a POST request with auth params
-// to the app's "Путь обработчика" URL. We convert that POST into a
-// redirect with query params (matching the old Express server.ts logic),
-// and for plain GET requests we serve the built SPA (dist/index.html).
+//
+// Bitrix24 loads local apps in an iframe by sending a POST request with
+// auth params (AUTH_ID, DOMAIN, ...) to the app's "Путь обработчика" URL,
+// and it also appends its own query params (APP_SID, DOMAIN, PROTOCOL,
+// LANG) to that URL. The BX24 JS SDK reads APP_SID from location.search
+// to perform its postMessage handshake with the parent frame — so we must
+// NOT redirect (the old 302 flow dropped APP_SID and silently broke every
+// BX24.* call, which is why user autofill and CRM settings never worked).
+//
+// Instead we serve the built SPA directly for both GET and POST, and for
+// POST we inject the auth params into the page as window.__BX_AUTH__ so
+// the client can also use the REST proxy fallback.
+const AUTH_KEYS = [
+  "AUTH_ID",
+  "REFRESH_ID",
+  "DOMAIN",
+  "MEMBER_ID",
+  "PLACEMENT",
+  "PLACEMENT_OPTIONS",
+  "USER_ID",
+  "APP_SID",
+  "LANG",
+  "PROTOCOL",
+];
+
 export default function handler(req: any, res: any) {
-  if (req.method === "POST") {
-    const body = req.body || {};
-    const {
-      AUTH_ID,
-      REFRESH_ID,
-      DOMAIN,
-      MEMBER_ID,
-      PLACEMENT,
-      PLACEMENT_OPTIONS,
-      USER_ID,
-    } = body;
-
-    const params = new URLSearchParams();
-    if (AUTH_ID) params.append("AUTH_ID", String(AUTH_ID));
-    if (REFRESH_ID) params.append("REFRESH_ID", String(REFRESH_ID));
-    if (DOMAIN) params.append("DOMAIN", String(DOMAIN));
-    if (MEMBER_ID) params.append("MEMBER_ID", String(MEMBER_ID));
-    if (PLACEMENT) params.append("PLACEMENT", String(PLACEMENT));
-    if (USER_ID) params.append("USER_ID", String(USER_ID));
-
-    if (PLACEMENT_OPTIONS) {
-      const optStr =
-        typeof PLACEMENT_OPTIONS === "object"
-          ? JSON.stringify(PLACEMENT_OPTIONS)
-          : String(PLACEMENT_OPTIONS);
-      params.append("PLACEMENT_OPTIONS", optStr);
-    }
-
-    res.writeHead(302, { Location: `/?${params.toString()}` });
-    res.end();
+  let html: string;
+  try {
+    // NOTE: the build renames dist/index.html -> dist/app.html so that no
+    // static file exists at "/". If a static index.html were present,
+    // Vercel would serve it directly for requests to "/" and skip this
+    // function entirely (for both GET and POST).
+    html = fs.readFileSync(path.join(process.cwd(), "dist", "app.html"), "utf-8");
+  } catch (err) {
+    console.error("Failed to read dist/app.html:", err);
+    res.status(500).send("Build output not found. Did the build run?");
     return;
   }
 
-  // GET (and anything else): serve the built single-page app.
-  // NOTE: the build renames dist/index.html -> dist/app.html so that no
-  // static file exists at "/". If a static index.html were present,
-  // Vercel would serve it directly for requests to "/" and skip this
-  // function entirely (for both GET and POST), which is exactly the bug
-  // that caused Bitrix24's POST-based auth handoff to silently no-op.
-  try {
-    const indexPath = path.join(process.cwd(), "dist", "app.html");
-    const html = fs.readFileSync(indexPath, "utf-8");
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(html);
-  } catch (err) {
-    console.error("Failed to read dist/index.html:", err);
-    res.status(500).send("Build output not found. Did the build run?");
+  const source: Record<string, any> = {
+    ...(req.query || {}),
+    ...(req.method === "POST" ? req.body || {} : {}),
+  };
+
+  const auth: Record<string, string> = {};
+  for (const key of AUTH_KEYS) {
+    const value = source[key];
+    if (value !== undefined && value !== null && value !== "") {
+      auth[key] = typeof value === "object" ? JSON.stringify(value) : String(value);
+    }
   }
+
+  if (Object.keys(auth).length > 0) {
+    // <-escape so user-controlled values can't close the script tag
+    const json = JSON.stringify(auth).replace(/</g, "\\u003c");
+    html = html.replace(
+      "<head>",
+      `<head><script>window.__BX_AUTH__=${json};</script>`
+    );
+  }
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.status(200).send(html);
 }

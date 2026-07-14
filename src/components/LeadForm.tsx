@@ -19,22 +19,22 @@ import {
   AlertCircle
 } from "lucide-react";
 import { IdeaForm, FieldMapping } from "../types";
-import { isBx24Available, adjustIframeHeight, RECOMMENDED_FIELDS } from "../utils/bx24";
+import { adjustIframeHeight, RECOMMENDED_FIELDS } from "../utils/bx24";
 
 interface LeadFormProps {
   initialForm: IdeaForm;
   mapping: FieldMapping;
   autoFilled: boolean;
   onSubmit: (formData: IdeaForm) => Promise<{ ideaNumber: number; leadId?: number }>;
-  onNavigateToSettings: () => void;
 }
 
-export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit, onNavigateToSettings }: LeadFormProps) {
+export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit }: LeadFormProps) {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<IdeaForm>(initialForm);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [lastSubmittedIdeaNumber, setLastSubmittedIdeaNumber] = useState<number>(0);
+  const [lastLeadId, setLastLeadId] = useState<number | undefined>(undefined);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Synced state on initial load
@@ -119,6 +119,7 @@ export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit, o
     try {
       const result = await onSubmit(form);
       setLastSubmittedIdeaNumber(result.ideaNumber);
+      setLastLeadId(result.leadId);
       setSuccess(true);
       
       // Reset form
@@ -453,35 +454,14 @@ export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit, o
                     </div>
                   </div>
 
-                  {/* Proactive Mapping Advisor */}
-                  {isFullyComments && (
-                    <div id="mapping-warning-card" className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3 text-xs text-amber-900 leading-relaxed">
-                      <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-bold">⚠️ Внимание: поля сохранятся в один комментарий</p>
-                        <p className="mt-0.5 text-amber-800">
-                          Сейчас в CRM Битрикс24 не настроены отдельные ячейки под каждый параметр идеи. 
-                          Все ваши ответы склеятся в одну большую текстовую область. Мы рекомендуем включить автоматическую 
-                          настройку, чтобы разложить данные по полочкам!
-                        </p>
-                        <button 
-                          type="button"
-                          onClick={onNavigateToSettings}
-                          className="mt-2 text-amber-950 font-bold underline hover:text-amber-900"
-                        >
-                          Настроить интеграцию с CRM за 2 секунды ❯
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {!isFullyComments && mappedCount < RECOMMENDED_FIELDS.length && (
+                  {/* CRM mapping status (fields are created and mapped automatically) */}
+                  {!isFullyComments && (
                     <div id="mapping-info-card" className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex gap-3 text-xs text-emerald-900 leading-relaxed">
                       <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
                       <div>
                         <p className="font-bold">✨ Активная интеграция ячеек ({mappedCount} из {RECOMMENDED_FIELDS.length} полей)</p>
                         <p className="mt-0.5 text-emerald-800">
-                          Часть параметров этой идеи будет записана в соответствующие персональные поля в карточке лида в Вашем Битрикс24. 
+                          Параметры этой идеи будут записаны в соответствующие поля карточки лида в Вашем Битрикс24.
                           Это позволит строить отчетность и вести фильтрацию!
                         </p>
                       </div>
@@ -572,7 +552,7 @@ export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit, o
               <div className="flex justify-between">
                 <span>ID записи в Битрикс24:</span>
                 <span className="font-mono text-[#1D1D1F] bg-[#E5E5E7] px-1.5 py-0.5 rounded-md">
-                  {lastSubmittedIdeaNumber ? `LEAD_${lastSubmittedIdeaNumber * 123}` : "Синхронизировано"}
+                  {lastLeadId ? `LEAD_${lastLeadId}` : "Синхронизировано"}
                 </span>
               </div>
             </div>
