@@ -56,6 +56,7 @@ export default function App() {
   
   // App states
   const [mapping, setMapping] = useState<FieldMapping>(DEFAULT_MAPPING);
+  const [fieldsCreateError, setFieldsCreateError] = useState<string | null>(null);
   const [archive, setArchive] = useState<ArchiveItem[]>([]);
   const [initialForm, setInitialForm] = useState<IdeaForm>({
     fullName: "",
@@ -123,10 +124,11 @@ export default function App() {
   }, [activeTab]);
 
   // Ensures the custom UF_CRM_IDEA_* lead fields exist (creating any missing
-  // ones — requires CRM admin rights, failures are silent) and maps every
-  // form field that has a matching CRM field. Fields that could not be
-  // created stay on the COMMENTS fallback, which is always written anyway.
-  const ensureCrmFields = async () => {
+  // ones — requires CRM admin rights) and maps every form field that has a
+  // matching CRM field. Fields that could not be created stay on the
+  // COMMENTS fallback, which is always written anyway. Returns the fresh
+  // mapping so the submit flow can use it without racing React state.
+  const ensureCrmFields = async (): Promise<FieldMapping> => {
     try {
       let fields = await fetchLeadFields();
       const missing = RECOMMENDED_FIELDS.filter(
@@ -135,17 +137,22 @@ export default function App() {
 
       if (missing.length > 0) {
         let createdAny = false;
+        let lastError: string | null = null;
         for (const def of missing) {
           try {
             await createLeadUserField(def);
             createdAny = true;
-          } catch (e) {
+          } catch (e: any) {
+            lastError = e?.message || String(e);
             console.warn(`Could not auto-create CRM field ${def.fullCode}:`, e);
           }
         }
         if (createdAny) {
           fields = await fetchLeadFields();
         }
+        setFieldsCreateError(createdAny ? null : lastError);
+      } else {
+        setFieldsCreateError(null);
       }
 
       const newMapping: FieldMapping = { ...DEFAULT_MAPPING };
@@ -157,8 +164,10 @@ export default function App() {
 
       setMapping(newMapping);
       localStorage.setItem("crm_field_mapping", JSON.stringify(newMapping));
+      return newMapping;
     } catch (e) {
       console.warn("Could not sync CRM idea fields", e);
+      return mapping;
     }
   };
 
@@ -202,6 +211,11 @@ export default function App() {
 
   // Triggers when a lead is submitted
   const handleLeadSubmit = async (formData: IdeaForm): Promise<{ ideaNumber: number; leadId?: number }> => {
+    // 0. Re-sync CRM fields right before submitting so we always write into
+    // every UF_CRM_IDEA_* field that exists at this moment (and retry
+    // creating missing ones — succeeds when the user is a CRM admin)
+    const activeMapping = await ensureCrmFields();
+
     // 1. Calculate next idea number from lead title count (matching vue mechanism)
     let ideaNumber = archive.length + 1;
     try {
@@ -263,7 +277,7 @@ export default function App() {
     ];
 
     formKeys.forEach((key) => {
-      const targetCrmField = mapping[key];
+      const targetCrmField = activeMapping[key];
       if (targetCrmField && targetCrmField !== "COMMENTS") {
         fields[targetCrmField] = formData[key as keyof IdeaForm];
       }
@@ -432,6 +446,7 @@ export default function App() {
                 initialForm={initialForm}
                 mapping={mapping}
                 autoFilled={autoFilled}
+                fieldsCreateError={fieldsCreateError}
                 onSubmit={handleLeadSubmit}
               />
             </motion.div>

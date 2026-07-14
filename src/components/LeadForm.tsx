@@ -25,10 +25,11 @@ interface LeadFormProps {
   initialForm: IdeaForm;
   mapping: FieldMapping;
   autoFilled: boolean;
+  fieldsCreateError: string | null;
   onSubmit: (formData: IdeaForm) => Promise<{ ideaNumber: number; leadId?: number }>;
 }
 
-export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit }: LeadFormProps) {
+export default function LeadForm({ initialForm, mapping, autoFilled, fieldsCreateError, onSubmit }: LeadFormProps) {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<IdeaForm>(initialForm);
   const [loading, setLoading] = useState(false);
@@ -455,6 +456,25 @@ export default function LeadForm({ initialForm, mapping, autoFilled, onSubmit }:
                   </div>
 
                   {/* CRM mapping status (fields are created and mapped automatically) */}
+                  {isFullyComments && (
+                    <div id="mapping-warning-card" className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3 text-xs text-amber-900 leading-relaxed">
+                      <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Отдельные поля CRM пока не созданы</p>
+                        <p className="mt-0.5 text-amber-800">
+                          Идея сохранится в комментарий лида одним текстом. Чтобы данные раскладывались по отдельным полям
+                          карточки, достаточно один раз открыть это приложение под пользователем с правами администратора CRM —
+                          поля создадутся автоматически.
+                        </p>
+                        {fieldsCreateError && (
+                          <p className="mt-1.5 font-mono text-[10px] text-amber-700/80">
+                            Ответ Битрикс24: {fieldsCreateError}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {!isFullyComments && (
                     <div id="mapping-info-card" className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex gap-3 text-xs text-emerald-900 leading-relaxed">
                       <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />

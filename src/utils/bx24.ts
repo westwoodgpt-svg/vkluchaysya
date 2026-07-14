@@ -281,12 +281,12 @@ export async function createLeadUserField(fieldDef: FieldDef): Promise<string> {
   try {
     const params = {
       fields: {
+        // Bitrix24 prepends UF_CRM_ automatically: IDEA_DEPT -> UF_CRM_IDEA_DEPT
         FIELD_NAME: fieldDef.fieldName,
         EDIT_FORM_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
         LIST_COLUMN_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
         LIST_FILTER_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
         USER_TYPE_ID: fieldDef.type === "string" ? "string" : fieldDef.type,
-        ENTITY_ID: "CRM_LEAD",
         MANDATORY: "N",
         SHOW_FILTER: "Y",
         SHOW_IN_LIST: "Y",
@@ -294,11 +294,15 @@ export async function createLeadUserField(fieldDef: FieldDef): Promise<string> {
       }
     };
 
-    const res = await callMethod("crm.userfield.add", params);
+    // NOTE: the generic "crm.userfield.add" method does not exist in the
+    // Bitrix24 REST API — user fields are created via the entity-specific
+    // method. Calling the wrong method made auto-creation fail silently
+    // even for CRM administrators.
+    const res = await callMethod("crm.lead.userfield.add", params);
     return res.data; // Returns ID of the created field
   } catch (err: any) {
     // If the field already exists, don't fail, just return a custom string
-    if (err.message && err.message.includes("already exists")) {
+    if (err.message && /already exists|уже существует/i.test(err.message)) {
       return "ALREADY_EXISTS";
     }
     console.error(`Failed to create custom field ${fieldDef.fieldName}:`, err);
