@@ -270,7 +270,7 @@ export default function App() {
       NAME: firstName,
       SECOND_NAME: secondName,
       POST: formData.position,
-      ASSIGNED_BY_ID: 1220, // Assigned manager from the Vue constructor template
+      ASSIGNED_BY_ID: 1324, // Assigned manager from the Vue constructor template
       SOURCE_ID: "6",       // Source: Web site/Widget
       SOURCE_DESCRIPTION: "Включайся",
       COMMENTS: formattedComments // Always supply readable comments as backup
