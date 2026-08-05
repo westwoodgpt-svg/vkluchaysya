@@ -357,7 +357,7 @@ export default function App() {
               transition={{ delay: 0.1 }}
               className="text-3xl md:text-5xl font-black tracking-tight text-[#1D1D1F]"
             >
-              Поделитесь идеей
+              Есть идея!
             </motion.h1>
             
             <motion.p 
