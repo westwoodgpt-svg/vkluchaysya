@@ -26,10 +26,11 @@ interface LeadFormProps {
   mapping: FieldMapping;
   autoFilled: boolean;
   fieldsCreateError: string | null;
+  serverSubmitReady: boolean;
   onSubmit: (formData: IdeaForm) => Promise<{ ideaNumber: number; leadId?: number }>;
 }
 
-export default function LeadForm({ initialForm, mapping, autoFilled, fieldsCreateError, onSubmit }: LeadFormProps) {
+export default function LeadForm({ initialForm, mapping, autoFilled, fieldsCreateError, serverSubmitReady, onSubmit }: LeadFormProps) {
   const [step, setStep] = useState(1);
   const [form, setForm] = useState<IdeaForm>(initialForm);
   const [loading, setLoading] = useState(false);
@@ -456,7 +457,20 @@ export default function LeadForm({ initialForm, mapping, autoFilled, fieldsCreat
                   </div>
 
                   {/* CRM mapping status (fields are created and mapped automatically) */}
-                  {isFullyComments && (
+                  {isFullyComments && serverSubmitReady && (
+                    <div id="mapping-server-card" className="bg-sky-50 border border-sky-100 rounded-2xl p-4 flex gap-3 text-xs text-sky-900 leading-relaxed">
+                      <CheckCircle className="w-5 h-5 text-sky-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Идея уйдёт в CRM через сервис Фонда</p>
+                        <p className="mt-0.5 text-sky-800">
+                          У вашей учётной записи нет прав на CRM, поэтому лид создаст сервис приложения —
+                          он же разложит ответы по отдельным полям карточки. Просто нажмите «Подать идею».
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {isFullyComments && !serverSubmitReady && (
                     <div id="mapping-warning-card" className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3 text-xs text-amber-900 leading-relaxed">
                       <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
                       <div>
@@ -465,6 +479,10 @@ export default function LeadForm({ initialForm, mapping, autoFilled, fieldsCreat
                           Идея сохранится в комментарий лида одним текстом. Чтобы данные раскладывались по отдельным полям
                           карточки, достаточно один раз открыть это приложение под пользователем с правами администратора CRM —
                           поля создадутся автоматически.
+                        </p>
+                        <p className="mt-1.5 text-amber-800">
+                          Если при отправке Битрикс24 отвечает «Access denied» — у учётной записи нет прав на CRM.
+                          Администратору нужно выдать права на создание лидов или включить в приложении сервисный вебхук.
                         </p>
                         {fieldsCreateError && (
                           <p className="mt-1.5 font-mono text-[10px] text-amber-700/80">

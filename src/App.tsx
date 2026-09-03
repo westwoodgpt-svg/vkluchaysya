@@ -15,8 +15,18 @@ import {
   fetchLeadFields,
   createLeadUserField,
   whenBx24Ready,
+  isAccessDeniedError,
+  isServerSubmitAvailable,
+  submitIdeaViaServer,
+  describeBitrixError,
   RECOMMENDED_FIELDS
 } from "./utils/bx24";
+import {
+  DEFAULT_MAPPING,
+  buildLeadFields,
+  buildMapping,
+  resolveCrmField
+} from "./utils/leadPayload";
 import LeadForm from "./components/LeadForm";
 import Archive from "./components/Archive";
 
@@ -36,17 +46,6 @@ const BG_SVG = [
   '</svg>'
 ].join("");
 
-const DEFAULT_MAPPING: FieldMapping = {
-  department: "COMMENTS",
-  category: "COMMENTS",
-  currentSituation: "COMMENTS",
-  idea: "COMMENTS",
-  materialsLink: "COMMENTS",
-  needFinance: "COMMENTS",
-  implementation: "COMMENTS",
-  audience: "COMMENTS"
-};
-
 export default function App() {
   const [activeTab, setActiveTab] = useState<"form" | "archive">("form");
   const [auth, setAuth] = useState<BitrixAuth | null>(null);
@@ -57,6 +56,9 @@ export default function App() {
   // App states
   const [mapping, setMapping] = useState<FieldMapping>(DEFAULT_MAPPING);
   const [fieldsCreateError, setFieldsCreateError] = useState<string | null>(null);
+  // True when the serverless API can create leads through the portal's
+  // service webhook — the route employees without CRM rights go through.
+  const [serverSubmitReady, setServerSubmitReady] = useState(false);
   const [archive, setArchive] = useState<ArchiveItem[]>([]);
   const [initialForm, setInitialForm] = useState<IdeaForm>({
     fullName: "",
@@ -96,7 +98,12 @@ export default function App() {
       console.warn("Failed to load crm mappings", e);
     }
 
-    // 3. Get Authentication — wait for the BX24 SDK handshake first so
+    // 3. Ask the serverless API whether the service webhook is configured
+    isServerSubmitAvailable().then(available => {
+      if (!cancelled) setServerSubmitReady(available);
+    });
+
+    // 4. Get Authentication — wait for the BX24 SDK handshake first so
     // BX24.getAuth() can be used as the primary token source
     (async () => {
       await whenBx24Ready();
@@ -122,17 +129,6 @@ export default function App() {
   useEffect(() => {
     adjustIframeHeight();
   }, [activeTab]);
-
-  // Matches a recommended field to an existing CRM lead field either by its
-  // exact code (UF_CRM_IDEA_*) or by its display name ("Включайся: ...").
-  // Name matching lets manually created fields work too — the lead card UI
-  // auto-generates codes like UF_CRM_17xxxxx that can't be customized.
-  const resolveCrmField = (def: (typeof RECOMMENDED_FIELDS)[number], fields: { id: string; title: string }[]) => {
-    const byCode = fields.find(f => f.id === def.fullCode);
-    if (byCode) return byCode;
-    const wanted = def.label.trim().toLowerCase();
-    return fields.find(f => f.id.startsWith("UF_") && f.title.trim().toLowerCase() === wanted);
-  };
 
   // Ensures the custom "Включайся" lead fields exist (creating any missing
   // ones — requires CRM admin rights) and maps every form field that has a
@@ -166,13 +162,7 @@ export default function App() {
         setFieldsCreateError(null);
       }
 
-      const newMapping: FieldMapping = { ...DEFAULT_MAPPING };
-      for (const def of RECOMMENDED_FIELDS) {
-        const match = resolveCrmField(def, fields);
-        if (match) {
-          newMapping[def.key as keyof FieldMapping] = match.id;
-        }
-      }
+      const newMapping = buildMapping(fields);
 
       setMapping(newMapping);
       localStorage.setItem("crm_field_mapping", JSON.stringify(newMapping));
@@ -240,66 +230,40 @@ export default function App() {
       console.warn("Failed to query leads count, using local size:", e);
     }
 
-    // 2. Prepare Name splits
-    const parts = formData.fullName.trim().split(/\s+/).filter(Boolean);
-    const lastName = parts[0] || "";
-    const firstName = parts[1] || "";
-    const secondName = parts.slice(2).join(" ");
-
-    // 3. Build a high-fidelity formatted description string for the generic COMMENTS box (backup)
-    const formattedComments = [
-      `✦ Название идеи: ${formData.ideaTitle}`,
-      "--------------------------------------------",
-      `• ФИО автора: ${formData.fullName}`,
-      `• Должность: ${formData.position}`,
-      `• Отдел: ${formData.department}`,
-      "--------------------------------------------",
-      `• Категория: ${formData.category}`,
-      `• Текущая ситуация: ${formData.currentSituation}`,
-      `• Предлагаемое решение: ${formData.idea}`,
-      `• Ссылка на материалы: ${formData.materialsLink || "—"}`,
-      "--------------------------------------------",
-      `• Требуются финансы: ${formData.needFinance}`,
-      `• Готовность к внедрению: ${formData.implementation}`,
-      `• Для кого идея: ${formData.audience}`
-    ].join("\n");
-
-    const fields: any = {
-      TITLE: `Идея № ${ideaNumber} — ${formData.ideaTitle}`,
-      LAST_NAME: lastName,
-      NAME: firstName,
-      SECOND_NAME: secondName,
-      POST: formData.position,
-      ASSIGNED_BY_ID: 1324, // Assigned manager from the Vue constructor template
-      SOURCE_ID: "6",       // Source: Web site/Widget
-      SOURCE_DESCRIPTION: "Включайся",
-      COMMENTS: formattedComments // Always supply readable comments as backup
-    };
-
-    // 4. Map form answers to separate CRM fields if defined
-    const formKeys: (keyof FieldMapping)[] = [
-      "department", 
-      "category", 
-      "currentSituation", 
-      "idea", 
-      "materialsLink", 
-      "needFinance", 
-      "implementation", 
-      "audience"
-    ];
-
-    formKeys.forEach((key) => {
-      const targetCrmField = activeMapping[key];
-      if (targetCrmField && targetCrmField !== "COMMENTS") {
-        fields[targetCrmField] = formData[key as keyof IdeaForm];
+    // 2. Create the lead with the employee's own rights. Colleagues who are
+    // not in a CRM permission role get "Access denied. (400)" here — for
+    // them the serverless route creates the lead through the portal's
+    // service webhook instead, so the filled-in idea is never lost.
+    let leadId: number | undefined;
+    try {
+      const fields = buildLeadFields(formData, ideaNumber, activeMapping);
+      const addRes = await callMethod("crm.lead.add", { fields });
+      const rawId = addRes.data;
+      leadId = typeof rawId === "number" ? rawId : parseInt(rawId, 10) || undefined;
+    } catch (err: any) {
+      if (!isAccessDeniedError(err)) {
+        throw new Error(describeBitrixError(err));
       }
-    });
 
-    // 5. Submit to CRM Lead Add
-    const addRes = await callMethod("crm.lead.add", { fields });
-    const leadId = addRes.data;
+      console.warn("crm.lead.add denied for this user, trying the service webhook route:", err);
+      try {
+        const viaServer = await submitIdeaViaServer(formData);
+        ideaNumber = viaServer.ideaNumber || ideaNumber;
+        leadId = viaServer.leadId;
+        setServerSubmitReady(true);
+      } catch (serverErr: any) {
+        if (serverErr?.serverFallbackStatus === 501) {
+          // No webhook configured — the original permission problem stands.
+          setServerSubmitReady(false);
+          throw new Error(describeBitrixError(err));
+        }
+        throw new Error(
+          `Не удалось отправить идею от имени сервиса: ${serverErr?.message || serverErr}`
+        );
+      }
+    }
 
-    // 6. Append to local history archive
+    // 3. Append to local history archive
     const now = new Date();
     const dateStr = now.toLocaleDateString("ru-RU") + " " + now.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 
@@ -308,7 +272,7 @@ export default function App() {
       id: String(Date.now()),
       date: dateStr,
       ideaNumber,
-      leadId: typeof leadId === "number" ? leadId : parseInt(leadId) || undefined
+      leadId
     };
 
     const updatedArchive = [newItem, ...archive]; // Newest first
@@ -459,6 +423,7 @@ export default function App() {
                 mapping={mapping}
                 autoFilled={autoFilled}
                 fieldsCreateError={fieldsCreateError}
+                serverSubmitReady={serverSubmitReady}
                 onSubmit={handleLeadSubmit}
               />
             </motion.div>

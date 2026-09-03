@@ -1,24 +1,15 @@
-import { BitrixAuth, CrmField } from "../types";
+import { BitrixAuth, CrmField, IdeaForm } from "../types";
+import {
+  FieldDef,
+  RECOMMENDED_FIELDS,
+  normalizeLeadFields,
+  userFieldAddParams
+} from "./leadPayload";
 
-// Recommended custom CRM Lead field definitions
-export interface FieldDef {
-  key: string;
-  fieldName: string; // The suffix without UF_CRM_
-  fullCode: string;  // The actual expected code: UF_CRM_IDEA_...
-  label: string;
-  type: string;
-}
-
-export const RECOMMENDED_FIELDS: FieldDef[] = [
-  { key: "department", fieldName: "IDEA_DEPT", fullCode: "UF_CRM_IDEA_DEPT", label: "Включайся: Отдел", type: "string" },
-  { key: "category", fieldName: "IDEA_CAT", fullCode: "UF_CRM_IDEA_CAT", label: "Включайся: Категория идеи", type: "string" },
-  { key: "currentSituation", fieldName: "IDEA_SIT", fullCode: "UF_CRM_IDEA_SIT", label: "Включайся: Текущая ситуация", type: "string" },
-  { key: "idea", fieldName: "IDEA_DESC", fullCode: "UF_CRM_IDEA_DESC", label: "Включайся: Суть идеи", type: "string" },
-  { key: "materialsLink", fieldName: "IDEA_LINK", fullCode: "UF_CRM_IDEA_LINK", label: "Включайся: Ссылка на материалы", type: "string" },
-  { key: "needFinance", fieldName: "IDEA_FIN", fullCode: "UF_CRM_IDEA_FIN", label: "Включайся: Финансовые затраты", type: "string" },
-  { key: "implementation", fieldName: "IDEA_IMPL", fullCode: "UF_CRM_IDEA_IMPL", label: "Включайся: Готовность внедрить", type: "string" },
-  { key: "audience", fieldName: "IDEA_AUD", fullCode: "UF_CRM_IDEA_AUD", label: "Включайся: Целевая аудитория", type: "string" },
-];
+// Field definitions live in the shared module (used by the serverless API
+// too); re-exported here so existing importers keep working.
+export type { FieldDef };
+export { RECOMMENDED_FIELDS };
 
 /**
  * Checks if the official Bitrix24 JS SDK is available in the browser.
@@ -85,7 +76,7 @@ export function whenBx24Ready(timeoutMs = 4000): Promise<boolean> {
 }
 
 /**
- * Automatically adjusts the height of the Bitrix24 iframe.
+ * Adjusts the height of the Bitrix24 iframe.
  * Should be called whenever the DOM height changes.
  */
 export function adjustIframeHeight() {
@@ -244,42 +235,47 @@ export async function callMethod(method: string, params: any = {}): Promise<any>
 }
 
 /**
+ * True when Bitrix24 refused the call because of the current user's
+ * permissions rather than because of a bug in the request. Employees who
+ * are not in a CRM permission role get this for every crm.* method —
+ * including crm.lead.add, which is what blocks them from submitting.
+ */
+export function isAccessDeniedError(err: any): boolean {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return /access denied|access_denied|insufficient|доступ запрещ|недостаточно прав/.test(msg);
+}
+
+/**
+ * Turns a raw Bitrix24 error (often the untranslated "Access denied. (400)")
+ * into something an employee can act on.
+ */
+export function describeBitrixError(err: any): string {
+  const raw = String(err?.message || err || "").trim();
+
+  if (isAccessDeniedError(err)) {
+    return (
+      "Битрикс24 не разрешает вашей учётной записи создавать лиды в CRM " +
+      "(«Access denied»). Попросите администратора портала выдать вам права " +
+      "на создание лидов — или настроить в приложении входящий вебхук, " +
+      "чтобы идеи отправлялись от имени сервиса. Идея пока не отправлена, " +
+      "текст сохранён в форме."
+    );
+  }
+
+  if (!raw) {
+    return "Не удалось отправить идею в CRM Битрикс24. Попробуйте ещё раз или обратитесь к администратору.";
+  }
+
+  return `Не удалось отправить идею в CRM Битрикс24: ${raw}`;
+}
+
+/**
  * Fetches all available lead fields (standard & user fields) from the active CRM.
  */
 export async function fetchLeadFields(): Promise<CrmField[]> {
   try {
     const res = await callMethod("crm.lead.fields", {});
-    const fieldsMap = res.data;
-    if (!fieldsMap) return [];
-
-    const list: CrmField[] = [];
-    for (const [key, val] of Object.entries(fieldsMap)) {
-      const fieldInfo = val as any;
-      let label: any = key;
-
-      if (fieldInfo) {
-        label = fieldInfo.title || fieldInfo.formLabel || fieldInfo.listLabel || fieldInfo.caption || key;
-        // Sometimes labels are object structures for different languages
-        if (typeof label === "object" && label !== null) {
-          const labelObj = label as Record<string, any>;
-          label = labelObj.ru || labelObj.en || Object.values(labelObj)[0] || key;
-        }
-      }
-
-      list.push({
-        id: key,
-        title: String(label),
-        type: fieldInfo?.type || "unknown"
-      });
-    }
-
-    // Sort: standard fields first, then UF_ fields, sorted alphabetically
-    return list.sort((a, b) => {
-      const aIsUf = a.id.startsWith("UF_");
-      const bIsUf = b.id.startsWith("UF_");
-      if (aIsUf !== bIsUf) return aIsUf ? 1 : -1;
-      return a.title.localeCompare(b.title, "ru");
-    });
+    return normalizeLeadFields(res.data);
   } catch (err) {
     console.error("Failed to fetch lead fields:", err);
     throw err;
@@ -291,26 +287,11 @@ export async function fetchLeadFields(): Promise<CrmField[]> {
  */
 export async function createLeadUserField(fieldDef: FieldDef): Promise<string> {
   try {
-    const params = {
-      fields: {
-        // Bitrix24 prepends UF_CRM_ automatically: IDEA_DEPT -> UF_CRM_IDEA_DEPT
-        FIELD_NAME: fieldDef.fieldName,
-        EDIT_FORM_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
-        LIST_COLUMN_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
-        LIST_FILTER_LABEL: { ru: fieldDef.label, en: fieldDef.label.replace("Включайся:", "Vkluchaysya:") },
-        USER_TYPE_ID: fieldDef.type === "string" ? "string" : fieldDef.type,
-        MANDATORY: "N",
-        SHOW_FILTER: "Y",
-        SHOW_IN_LIST: "Y",
-        SORT: 100,
-      }
-    };
-
     // NOTE: the generic "crm.userfield.add" method does not exist in the
     // Bitrix24 REST API — user fields are created via the entity-specific
     // method. Calling the wrong method made auto-creation fail silently
     // even for CRM administrators.
-    const res = await callMethod("crm.lead.userfield.add", params);
+    const res = await callMethod("crm.lead.userfield.add", userFieldAddParams(fieldDef));
     return res.data; // Returns ID of the created field
   } catch (err: any) {
     // If the field already exists, don't fail, just return a custom string
@@ -320,4 +301,66 @@ export async function createLeadUserField(fieldDef: FieldDef): Promise<string> {
     console.error(`Failed to create custom field ${fieldDef.fieldName}:`, err);
     throw err;
   }
+}
+
+/**
+ * Asks the serverless API whether the service webhook is configured, i.e.
+ * whether ideas can still be submitted for employees without CRM rights.
+ */
+export async function isServerSubmitAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/idea", { method: "GET" });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.configured);
+  } catch (e) {
+    console.warn("Could not check the server submit fallback:", e);
+    return false;
+  }
+}
+
+/**
+ * Creates the lead through the serverless API, which uses the portal's
+ * service webhook instead of the employee's own (possibly CRM-less) token.
+ * The API verifies the caller's Bitrix24 token before doing anything.
+ */
+export async function submitIdeaViaServer(
+  form: IdeaForm
+): Promise<{ ideaNumber: number; leadId?: number }> {
+  const auth = getAuth();
+  if (!auth) {
+    throw new Error("Не найдена активная авторизация. Пожалуйста, откройте приложение внутри Битрикс24.");
+  }
+
+  const response = await fetch("/api/idea", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      domain: auth.domain,
+      auth: auth.authId,
+      form,
+    }),
+  });
+
+  const data = await response.json().catch(() => null);
+
+  if (!data) {
+    const err: any = new Error(
+      `Сервер приложения вернул неожиданный ответ (HTTP ${response.status}).`
+    );
+    err.serverFallbackStatus = response.status;
+    throw err;
+  }
+
+  if (!response.ok || data.error) {
+    const detail = data.error_description || data.error || `HTTP ${response.status}`;
+    const err: any = new Error(String(detail));
+    err.serverFallbackStatus = response.status;
+    throw err;
+  }
+
+  return {
+    ideaNumber: Number(data.ideaNumber) || 0,
+    leadId: typeof data.leadId === "number" ? data.leadId : parseInt(data.leadId, 10) || undefined,
+  };
 }
